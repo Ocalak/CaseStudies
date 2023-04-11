@@ -1,0 +1,182 @@
+---
+title: "CS_SS23_preprocessing"
+author: "Quinnie"
+date: '2023-04-04'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=12, fig.height=8) 
+```
+
+```{r load packages}
+library(dplyr)
+```
+
+```{r read datasets}
+bitcoin = read.csv('D:/TU_DORTMUND/Case_Study/BTC_coinmarketcap.csv', sep = ';')
+bitcoin = bitcoin[, c('close','timestamp')]
+fred_qd = read.csv('D:/TU_DORTMUND/Case_Study/current.csv', sep = ',')
+fred_qd = fred_qd[3:260,c('sasdate','UNRATE', 'CPIAUCSL', 'FEDFUNDS', 'S.P.500')]
+```
+
+```{r preprocessing data}
+bitcoin$year <- as.numeric(format(as.Date(bitcoin$timestamp,format="%Y-%m-%d"),"%Y"))
+bitcoin$month <- as.numeric(format(as.Date(bitcoin$timestamp,format="%Y-%m-%d"),"%m"))
+bitcoin$ym <- format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%Y-%m")
+bitcoin$day <- as.numeric(format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%d"))
+
+fred_qd$ym <- format(as.Date(fred_qd$sasdate, format = "%m/%d/%Y"), "%Y-%m")
+## take the closing price of the last day of quarter
+bit1 = bitcoin[bitcoin$month %in% c(3, 6, 9, 12),]
+bit1 = merge(aggregate(day ~ ym, min, data = bit1), bit1)
+
+#join table to get data into 1 single dataframe
+df <- merge(x = bit1, y = fred_qd, by = 'ym', all.x = T)
+df$INFLATION = (df$CPIAUCSL-100)/100 
+df$coin_gr = (df$close -lag(df$close, 1))/lag(df$close, 1)
+df$sp500_gr = (df$S.P.500 -lag(df$S.P.500, 1))/lag(df$S.P.500, 1)
+
+#necessary variables
+df$sasdate <- as.Date(df$sasdate, format = "%m/%d/%Y")
+df <- na.omit(df)
+```
+## Including Plots
+
+
+```{r plots}
+library(ggplot2)
+library(data.table)
+setDT(df)
+df_plot <- melt(df, id.vars = "sasdate", measure.vars = c("coin_gr", 'UNRATE', 'INFLATION', 'FEDFUNDS', 'sp500_gr'))
+df_plot$sasdate <- as.Date(df_plot$sasdate, format = "%m/%d/%Y")
+df_plot <- na.omit(df_plot)
+options(repr.plot.width =25, repr.plot.height =10)
+ggplot(data = df_plot, aes(x = sasdate, y = value, group = variable)) +
+    geom_line(aes(colour = variable), size=0.8)+
+    scale_color_manual(values = c("#000000" ,"#E69F00" ,"#56B4E9" ,"#009E73", "#CC79A7"))+
+    labs(title = "Annual Growth Rate of Bitcoin and some relavent variables from 2010-2022")+
+    theme_minimal()
+```
+## Fitting AR(1)
+
+```{r AR1}
+
+df_ar1 = df_plot[df_plot$variable == 'coin_gr',]
+
+#Fitting AR(1)
+res<- c()
+pred <- c()
+for (i in c(2:48)){
+    ar1 <- arima(df_ar1$value[1:i], order = c(1, 0, 0))
+    predict_AR <- predict(ar1, h = 1)
+    pred[i+1] <- predict_AR$pred
+    res[i+1] <- df_ar1$value[i+1] -predict_AR$pred
+}
+
+#plot the time series along with the fitted values
+
+ts.plot(df_ar1$value)
+points(pred, type = "l", col = 2, lty = 2)
+
+
+#performance RMSE
+s = 0
+for (i in c(3:49)){
+    r_2 <- res[i]^2
+    s <- s+r_2
+}
+sqrt(s/47)
+
+rmse(pred[3:49], df_ar1$value[3:49])
+```
+```{r VAR(1)}
+coin_gr <- ts(df[,'coin_gr'])
+unemp_r <- ts(df[,'UNRATE'])
+inf_r <- ts(df[,'INFLATION'])
+fed_fund <- ts(df[,'FEDFUNDS'])
+sp500_gr <- ts(df[,'sp500_gr'])
+
+df_var1 <- window(ts.union(coin_gr, unemp_r, inf_r, fed_fund, sp500_gr))
+library(vars)
+#fitting model
+var1 <- VAR(y = df_var1, p = 1)
+
+#plot the time series along with the fitted values
+var1_residuals <- data.frame(var1_residuals)
+VAR_fit <- coin_gr[2:49] - var1_residuals$coin_gr
+ts.plot(coin_gr)
+points(VAR_fit, type = "l", col = 2, lty = 2)
+points(AR_fit, type = "l", col = 3, lty = 2)
+
+#performance RMSE
+sqrt(mean(var1_residuals$coin_gr^2))
+```
+```{r Granger causality}
+#Chaper 2.5
+#y2t is Granger causal for y1t if the latter variable can be predicted with lower mean squared error by taking into account the information in y2s, s ≤ t, in addition to all other relevant information.
+# it can be tested using a standard Wald test, if the coefficient is significantly different from 0
+
+```
+
+```{r VAR(p)}
+var_p <- VARselect(y = df_var1, lag.max = 3)
+
+#Choosing p according to AIC
+var_p$selection
+
+#Fitting VAR(3)
+
+var3 <- VAR(y = df_var1, p = 3)
+
+#plot the time series along with the fitted values
+var3_residuals <- data.frame(residuals(var3))
+VAR3_fit <- coin_gr[4:49] - var3_residuals$coin_gr
+ts.plot(coin_gr, lwd = 2)
+points(2:49, VAR_fit, type = "l", col = 'brown4', lty = 3)
+points(1:49, AR_fit, type = "l", col = 'darkorchid4', lty = 2)
+points(4:49, VAR3_fit, type = "l", col = 'green4', lty = 1, lwd = 1.5)
+
+#performance RMSE
+sqrt(mean(var3_residuals$coin_gr^2))
+```
+
+# Task 2:
+# Unrestricted mixed-data sampling
+
+```{r Repare data}
+# Bitcoin gr
+bitcoin = read.csv('D:/TU_DORTMUND/Case_Study/BTC_coinmarketcap.csv', sep = ';')[, c('timestamp','close')]
+bitcoin$timestamp <- as.Date(bitcoin$timestamp,format="%Y-%m-%d")
+bitcoin$month <- as.numeric(format(as.Date(bitcoin$timestamp,format="%Y-%m-%d"),"%m"))
+bitcoin$ym <- format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%Y-%m")
+bitcoin$day <- as.numeric(format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%d"))
+bit1 = bitcoin[bitcoin$month %in% c(3, 6, 9, 12),]
+bit1 = merge(aggregate(day ~ ym, min, data = bit1), bit1)
+bit1$close_lag1 <- lag(bit1$close, 1)
+bit1$coin_gr = (bit1$close - bit1$close_lag1)*100/bit1$close_lag1
+bit1 <- na.omit(bit1[c('ym', 'coin_gr')])
+rownames(bit1) <- c(1:50)
+bit1$month <- seq(0, 147, by = 3)
+y <- ts(bit1[0:49, 'coin_gr'])
+#fred_month data
+fred_md = read.csv('D:/TU_DORTMUND/Case_Study/monthly_data.csv', sep = ',')[2:771,c('sasdate','UNRATE', 'CPIAUCSL', 'FEDFUNDS', 'S.P.500')]
+fred_md$sasdate <- as.Date(fred_md$sasdate,format="%m/%d/%Y")
+fred_md$INFLATION = (fred_md$CPIAUCSL-100)*100/100
+fred_md$sp500_gr = (fred_md$S.P.500 -lag(fred_md$S.P.500, 1))*100/lag(fred_md$S.P.500, 1)
+fred_md <- na.omit(fred_md[c('sasdate', 'UNRATE', 'FEDFUNDS', 'INFLATION', 'sp500_gr')])
+fred_md <- fred_md[fred_md$sasdate >= '2010-10-01' & fred_md$sasdate <= '2022-12-01',]
+
+unrate <- ts(fred_md[c('UNRATE')])
+fedfunds <- ts(fred_md[c('FEDFUNDS')])
+infrate <- ts(fred_md[c('INFLATION')])
+sp500_gr <- ts(fred_md[c('sp500_gr')])
+x <- cbind(unrate, fedfunds, infrate, sp500_gr)
+```
+
+```{r midasr}
+hdt <- data.frame(x=window(x))
+ldt <- data.frame(y=y,trend=1:length(y))
+mu <- midas_u(y~mls(y,1,1) + fmls(unrate,3,3) + fmls(fedfunds,3,3) + fmls(infrate,3,3) + fmls(sp500_gr,3,3) -1, list(ldt, hdt))
+```

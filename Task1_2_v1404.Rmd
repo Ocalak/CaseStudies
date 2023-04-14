@@ -1,0 +1,311 @@
+---
+title: "CS_SS23_preprocessing"
+author: "Quinnie"
+date: '2023-04-04'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=20, fig.height=20) 
+```
+
+```{r load packages}
+library(dplyr)
+library(Metrics)
+library(vars)
+library(lmtest)
+library(hydroGOF)
+```
+
+```{r read datasets}
+bitcoin = read.csv('D:/TU_DORTMUND/Case_Study/BTC_coinmarketcap.csv', sep = ';')
+bitcoin = bitcoin[, c('close','timestamp')]
+fred_qd = read.csv('D:/TU_DORTMUND/Case_Study/current.csv', sep = ',')
+fred_qd = fred_qd[3:260,c('sasdate','UNRATE', 'CPIAUCSL', 'FEDFUNDS', 'S.P.500')]
+```
+
+```{r preprocessing data}
+bitcoin$month <- as.numeric(format(as.Date(bitcoin$timestamp,format="%Y-%m-%d"),"%m"))
+bitcoin$ym <- format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%Y-%m")
+bitcoin$day <- as.numeric(format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%d"))
+
+fred_qd$ym <- format(as.Date(fred_qd$sasdate, format = "%m/%d/%Y"), "%Y-%m")
+
+## take the closing price of the last day of quarter
+bit1 = bitcoin[bitcoin$month %in% c(3, 6, 9, 12),]
+bit1 = merge(aggregate(day ~ ym, max, data = bit1), bit1)
+
+#join table to get data into 1 single dataframe
+df <- merge(x = bit1, y = fred_qd, by = 'ym', all.x = T)
+df$INFLATION = (df$CPIAUCSL-lag(df$CPIAUCSL, 1))/lag(df$CPIAUCSL, 1)
+#df$INFLATION = (df$CPIAUCSL-100)/100 ( change the p in 1f to 3) 
+df$coin_gr = (df$close -lag(df$close, 1))/lag(df$close, 1)
+df$sp500_gr = (df$S.P.500 -lag(df$S.P.500, 1))/lag(df$S.P.500, 1)
+df$UNRATE <- df$UNRATE
+df$FEDFUNDS <- df$FEDFUNDS
+
+#necessary variables
+df$sasdate <- as.Date(df$sasdate, format = "%m/%d/%Y")
+df <- df[2:51,]
+```
+## Including Plots
+
+
+```{r plots}
+library(ggplot2)
+library(data.table)
+setDT(df)
+df_melted <- melt(df, id.vars = "sasdate", measure.vars = c("coin_gr", 'UNRATE', 'INFLATION', 'FEDFUNDS', 'sp500_gr'))
+df_melted$sasdate <- as.Date(df_melted$sasdate, format = "%m/%d/%Y")
+#df_melted <- na.omit(df_melted)
+ggplot(data = df_melted, aes(x = sasdate, y = value, group = variable)) +
+    geom_line(aes(colour = variable), size=0.8)+
+    scale_color_manual(values = c("#000000" ,"#E69F00" ,"#56B4E9" ,"#009E73", "#CC79A7"))+
+    labs(title = "Annual Growth Rate of Bitcoin and some relavent variables from 2010-2022")+
+    theme_minimal()
+
+
+ggplot(data = df_melted[df_melted$variable != 'coin_gr'], aes(x = sasdate, y = value, group = variable)) +
+    geom_line(aes(colour = variable), size=0.8)+
+    scale_color_manual(values = c("#E69F00" ,"#56B4E9" ,"#009E73", "#CC79A7"))+
+    labs(title = "US unemployment rate, federal funds rate and the growth rate of SP500 from 2010-2022")+
+    theme_minimal()
+```
+## Fitting AR(1)
+
+```{r AR1}
+
+coin_gr <- ts(df[,'coin_gr'])
+
+#Fitting AR(1)
+res_ar1 <- c()
+pred_ar1 <- c()
+for (i in c(2:length(coin_gr))){
+    ar1 <- arima(coin_gr[1:i], order = c(1, 0, 0))
+    predict_AR <- predict(ar1, h = 1)
+    pred_ar1[i+1] <- predict_AR$pred
+    res_ar1[i+1] <- coin_gr[i+1] -predict_AR$pred
+}
+
+#plot the time series along with the fitted values
+
+ts.plot(coin_gr)
+points(pred_ar1, type = "l", col = 2, lty = 2)
+
+
+#performance RMSE
+s_ar1 = 0
+for (i in c(1:length(res_ar1))){
+    if (is.na(res_ar1[i]) == FALSE){
+        s_ar1 <- s_ar1 + res_ar1[i]^2
+    }
+}
+sqrt(s_ar1/48)
+rmse(pred_ar1[3:50], coin_gr[3:50])
+```
+
+```{r VAR(1)}
+coin_gr <- ts(df[,'coin_gr'])
+unemp_r <- ts(df[,'UNRATE'])
+inf_r <- ts(df[,'INFLATION'])
+fed_fund <- ts(df[,'FEDFUNDS'])
+sp500_gr <- ts(df[,'sp500_gr'])
+
+df_var <- window(ts.union(coin_gr, unemp_r, inf_r, fed_fund, sp500_gr))
+
+#Fitting VAR(1)
+res_var1 <- c()
+pred_var1 <- c()
+for (i in c(7:length(coin_gr)-1)){ # the model doesn't work properly with i <=6 due to full rank assumption not met)
+    var1 <- VAR(y = ts(df_var[1:i,]), p = 1)
+    predict_VAR <- predict(var1, n.ahead = 1)$fcst$coin_gr
+    pred_var1[i+1] <- predict_VAR[1]
+    res_var1[i+1] <- coin_gr[i+1] -predict_VAR[1]
+}
+
+#plot the time series along with the fitted values
+
+ts.plot(coin_gr)
+points(pred_ar1, type = "l", col = 2, lty = 2)
+points(pred_var1, type = "l", col = 3, lty = 2)
+
+#performance RMSE
+s_var1 = 0
+for (i in c(1:length(res_var1))){
+    if (is.na(res_var1[i]) == FALSE){
+        s_var1 <- s_var1 + res_var1[i]^2
+    }
+}
+sqrt(s_var1/sum(is.na(res_var1) == FALSE))
+rmse(pred_var1[8:50], coin_gr[8:50])
+```
+
+```{r Granger causality}
+#Chaper 2.5
+#y2t is Granger causal for y1t if the latter variable can be predicted with lower mean squared error by taking into account the information in y2s, s ≤ t, in addition to all other relevant information.
+# it can be tested using a standard Wald test, if the coefficient is significantly different from 0
+
+unemp_coin <- grangertest(unemp_r, coin_gr, order = 1)
+inf_coin <- grangertest(inf_r, coin_gr, order = 1)
+fedfund_coin <- grangertest(fed_fund, coin_gr, order = 1)
+sp500_coin <- grangertest(sp500_gr, coin_gr, order = 1)
+
+if (unemp_coin$`Pr(>F)`[2] < 0.05){ print('Umemployment rate granger causes coin growth rate')} else {print('Umemployment rate is not useful for predicting coin growth rate')}
+if (inf_coin$`Pr(>F)`[2] < 0.05){ print('Inflation granger causes coin growth rate')} else {print('Inflation is not useful for predicting coin growth rate')}
+if (fedfund_coin$`Pr(>F)`[2] < 0.05){ print('Fedfund rate granger causes coin growth rate')} else {print('Fedfund rate is not useful for predicting coin growth rate')}
+if (sp500_coin$`Pr(>F)`[2] < 0.05){ print('SP500 growth rate granger causes coin growth rate')} else {print('SP500 growth rate is not useful for predicting coin growth rate')}
+```
+
+```{r VAR(p)}
+var_p <- VARselect(y = na.omit(df_var), lag.max = 3)
+
+#Choosing p according to AIC
+var_p$selection
+
+#Fitting VAR(2)
+# with p =2, we have in total 11 predictors, so i should start from 13 in order to meet the full rank assumption (excluding the last row being use as y)
+
+res_var2 <- c()
+pred_var2 <- c()
+for (i in c(13:length(coin_gr)-1)){
+    var2 <- VAR(y = ts(df_var[1:i,]), p = 2)
+    predict_VAR <- predict(var2, n.ahead = 1)$fcst$coin_gr
+    pred_var2[i+1] <- predict_VAR[1]
+    res_var2[i+1] <- coin_gr[i+1] -predict_VAR[1]
+}
+
+#plot the time series along with the fitted values
+ts.plot(pred_var2, col = 'brown4',  ylim = c(-41, 25))
+lines(coin_gr, col = 'black', lwd = 2)
+lines(pred_ar1, col = 'darkorchid4')
+lines(pred_var1, col = 'green4')
+legend('topright', c('Actual', 'AR(1)', 'VAR(1)', 'VAR(2)'), col = c('black', 'darkorchid4', 'green4', 'brown4'), lty =1, lwd = 4, cex = 2)
+
+#performance RMSE
+s_var2 = 0
+for (i in c(1:length(res_var2))){
+    if (is.na(res_var2[i]) == FALSE){
+        s_var2 <- s_var2 + res_var2[i]^2
+    }
+}
+sqrt(s_var2/sum(is.na(res_var2) == FALSE))
+rmse(pred_var2[14:50], coin_gr[14:50])
+```
+
+# Task 2:
+# Unrestricted mixed-data sampling
+
+```{r Repare data}
+# Bitcoin gr
+bitcoin = read.csv('D:/TU_DORTMUND/Case_Study/BTC_coinmarketcap.csv', sep = ';')[, c('timestamp','close')]
+bitcoin$timestamp <- as.Date(bitcoin$timestamp,format="%Y-%m-%d")
+bitcoin$month <- as.numeric(format(as.Date(bitcoin$timestamp,format="%Y-%m-%d"),"%m"))
+bitcoin$ym <- format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%Y-%m")
+bitcoin$day <- as.numeric(format(as.Date(bitcoin$timestamp, format="%Y-%m-%d"),"%d"))
+bit1 = bitcoin[bitcoin$month %in% c(3, 6, 9, 12),]
+bit1 = merge(aggregate(day ~ ym, min, data = bit1), bit1)
+bit1$close_lag1 <- lag(bit1$close, 1)
+bit1$coin_gr = (bit1$close - bit1$close_lag1)/bit1$close_lag1
+bit1 <- na.omit(bit1[c('ym', 'coin_gr')])
+rownames(bit1) <- c(1:50)
+y <- bit1[0:49, 'coin_gr']
+#fred_month data
+fred_md = read.csv('D:/TU_DORTMUND/Case_Study/monthly_data.csv', sep = ',')[2:771,c('sasdate','UNRATE', 'CPIAUCSL', 'FEDFUNDS', 'S.P.500')]
+fred_md$sasdate <- as.Date(fred_md$sasdate,format="%m/%d/%Y")
+fred_md$INFLATION = (fred_md$CPIAUCSL-lag(fred_md$CPIAUCSL, 1))/lag(fred_md$CPIAUCSL, 1)
+fred_md$sp500_gr = (fred_md$S.P.500 -lag(fred_md$S.P.500, 1))/lag(fred_md$S.P.500, 1)
+fred_md <- na.omit(fred_md[c('sasdate', 'UNRATE', 'FEDFUNDS', 'INFLATION', 'sp500_gr')])
+fred_md <- fred_md[fred_md$sasdate >= '2010-07-01' & fred_md$sasdate <= '2022-12-01',]
+
+unrate <- fred_md[,'UNRATE']
+fedfunds <- fred_md[,'FEDFUNDS']
+infrate <- fred_md[,'INFLATION']
+sp500_gr <- fred_md[,'sp500_gr']
+```
+
+```{r midasr}
+library(midasr)
+unrate_lag <- na.omit(data.frame(fmls(unrate,4,3)))
+fedfunds_lag <- na.omit(data.frame(fmls(fedfunds,4,3)))
+infrate_lag <- na.omit(data.frame(fmls(infrate,4,3)))
+sp500_lag <- na.omit(data.frame(fmls(sp500_gr,4,3)))
+
+# k = 1
+model_1 <- lm(y ~ 1+ lag(y,1) +
+                  unrate_lag$X.1.m + unrate_lag$X.2.m +
+                  fedfunds_lag$X.1.m + fedfunds_lag$X.2.m +
+                  infrate_lag$X.1.m + infrate_lag$X.2.m +
+                  sp500_lag$X.1.m + sp500_lag$X.2.m)
+aic_1 = AIC(model_1)
+
+# k = 2
+model_2 <- lm(y ~ 1+ lag(y,1) +
+                  unrate_lag$X.1.m + unrate_lag$X.2.m + unrate_lag$X.3.m +
+                  fedfunds_lag$X.1.m + fedfunds_lag$X.2.m + fedfunds_lag$X.3.m +
+                  infrate_lag$X.1.m + infrate_lag$X.2.m + infrate_lag$X.3.m +
+                  sp500_lag$X.1.m + sp500_lag$X.2.m + sp500_lag$X.3.m)
+aic_2 = AIC(model_2)
+
+# k = 3
+model_3 <- lm(y ~ 1+ lag(y,1) +
+                  unrate_lag$X.1.m + unrate_lag$X.2.m + unrate_lag$X.3.m + unrate_lag$X.4.m +
+                  fedfunds_lag$X.1.m + fedfunds_lag$X.2.m + fedfunds_lag$X.3.m + fedfunds_lag$X.4.m +
+                  infrate_lag$X.1.m + infrate_lag$X.2.m + infrate_lag$X.3.m + infrate_lag$X.4.m +
+                  sp500_lag$X.1.m + sp500_lag$X.2.m + sp500_lag$X.3.m + sp500_lag$X.4.m)
+aic_3 = AIC(model_3)
+
+min(aic_1, aic_2, aic_3)
+
+# the best one is obtained when K = 1
+```
+```{r Task 2i}
+#Using model_1 when K = 1
+summary(model_1)
+# only lag(unrate,1) is meaningful with p_value = 0.0788 (<0.1 :)))
+# Run reduced model
+reduced_model <- lm (y ~ unrate_lag$X.1.m - 1)
+AIC(reduced_model)
+```
+
+```{r Compare reduced model and AR(1)}
+ar1_model <- lm(y ~ lag(y, 1) + 1)
+rmse(y, reduced_model$fitted.values)
+rmse(y[2:49], ar1_model$fitted.values)
+```
+
+```{r if employing monthly helps to improve the forecasts?}
+#Yes. According to the RMSFEs, the reduced model outperforms the AR(1)
+```
+
+```{r Monthly forecast for coin_gr}
+bitcoin_m <- merge(aggregate(day ~ ym, min, data = bitcoin), bitcoin)
+bitcoin_md$coin_gr <- (bitcoin_m$close - lag(bitcoin_m$close,1))/lag(bitcoin_m$close,1)
+fred_md$ym <- format(as.Date(fred_md$sasdate, format="%Y-%m-%d"),"%Y-%m")
+monthly_data <- merge(bitcoin_m[,c('ym', 'coin_gr')], fred_md[,c('ym', 'UNRATE', 'FEDFUNDS', 'INFLATION', 'sp500_gr')])
+
+#select P
+
+varp_m <- VARselect(y = na.omit(monthly_data[,2:6]), lag.max = 12)
+varp_m$selection
+
+#p=3
+
+res_var3 <- c()
+pred_var3 <- c()
+for (i in c(18:length(monthly_data$coin_gr))){
+    var3 <- VAR(y = ts(na.omit(monthly_data[1:i,2:6])), p = 3)
+    predict_VAR <- predict(var3, n.ahead = 1)$fcst$coin_gr
+    pred_var3[i+1] <- predict_VAR[1]
+    res_var3[i+1] <- monthly_data$coin_gr[i+1] -predict_VAR[1]
+}
+
+#Performance
+rmse(monthly_data$coin_gr, pred_var3[1:150], na.rm = TRUE)
+
+# The higher p is not meaningful so much, p=3 is choosen
+# the monthly forecast is much more precise than the quarterly one. 
+
+```
+
+

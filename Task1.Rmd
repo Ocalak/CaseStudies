@@ -151,10 +151,6 @@ print(granger_test_UNM)
 print(granger_test_FEDF)
 print(granger_test_INFR)
 print(granger_test_SP500)
-#All together cause= BTC
-var_model <- VAR(data_ts, p=1, type = "const")
-grng_btc <- causality(var_model, cause = "BTC")$Granger$method
-print(grng_btc)
 
 
   
